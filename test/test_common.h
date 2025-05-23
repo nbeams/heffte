@@ -299,6 +299,8 @@ heffte::plan_options args_to_options(std::deque<std::string> const &args){
             options.algorithm = reshape_algorithm::alltoallv;
         }else if (s == "-a2ap"){
             options.algorithm = reshape_algorithm::alltoallp;
+        }else if (s == "-a2avp"){
+            options.algorithm = reshape_algorithm::alltoallvp;
         }else if (s == "-p2p"){
             options.algorithm = reshape_algorithm::p2p;
         }else if (s == "-p2p_pl"){

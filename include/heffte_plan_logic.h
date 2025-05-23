@@ -37,6 +37,7 @@ namespace heffte {
  * \code
  *      reshape_algorithm::alltoallv          : for larger FFT, many MPI ranks
  *      reshape_algorithm::alltoall           : for smaller FFT, many MPI ranks
+ *      reshape_algorithm::alltoallvp         : persistent alltoallv
  *      reshape_algorithm::alltoallp          : persistent alltoall
  *      reshape_algorithm::p2p_plined         : for larger FFT, fewer MPI ranks
  *      reshape_algorithm::p2p                : for smaller FFT, fewer MPI ranks
@@ -51,8 +52,10 @@ enum class reshape_algorithm{
     alltoallv = 0,
     //! \brief Using the MPI_Alltoall options, with padding on the data.
     alltoall = 3,
-    //! \brief Using the persistent MPI_Alltoall options, with padding on the data.
-    alltoallp = 4,
+    //! \brief Using the persistent MPI_Alltoallv options.
+    alltoallvp = 4,
+    //! \brief Using the persistent MPI_Alltoall options.
+    alltoallp = 5,
     //! \brief Using MPI_Isend and MPI_Irecv, all sending receiving packing and unpacking are pipelined.
     p2p_plined = 1,
     //! \brief Using MPI_Send and MPI_Irecv, receive is pipelined with packing and sending.
@@ -187,6 +190,7 @@ inline std::ostream & operator << (std::ostream &os, plan_options const options)
     switch (options.algorithm){
         case reshape_algorithm::alltoallv  : algorithm = "mpi:alltoallv"; break;
         case reshape_algorithm::alltoall   : algorithm = "mpi:alltoall"; break;
+        case reshape_algorithm::alltoallvp : algorithm = "mpi:alltoallvp"; break;
         case reshape_algorithm::alltoallp  : algorithm = "mpi:alltoallp"; break;
         case reshape_algorithm::p2p_plined : algorithm = "mpi:point-to-point-pipelined"; break;
         case reshape_algorithm::p2p        : algorithm = "mpi:point-to-point"; break;
