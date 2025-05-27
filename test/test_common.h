@@ -83,6 +83,8 @@ struct using_pointtopoint{};
 template<reshape_algorithm variant> std::string get_description(){ return ""; }
 template<> std::string get_description<reshape_algorithm::alltoallv>(){ return "heffte::reshape3d_alltoallv"; }
 template<> std::string get_description<reshape_algorithm::alltoall>(){ return "heffte::reshape3d_alltoall"; }
+template<> std::string get_description<reshape_algorithm::alltoallv_p>(){ return "heffte::reshape3d_alltoallv (persistent)"; }
+template<> std::string get_description<reshape_algorithm::alltoall_p>(){ return "heffte::reshape3d_alltoall (persistent)"; }
 template<> std::string get_description<reshape_algorithm::p2p>(){ return "heffte::reshape3d_pointtopoint"; }
 template<> std::string get_description<reshape_algorithm::p2p_plined>(){ return "heffte::reshape3d_p2p (plined)"; }
 
@@ -297,10 +299,10 @@ heffte::plan_options args_to_options(std::deque<std::string> const &args){
             options.algorithm = reshape_algorithm::alltoall;
         }else if (s == "-a2av"){
             options.algorithm = reshape_algorithm::alltoallv;
-        }else if (s == "-a2ap"){
-            options.algorithm = reshape_algorithm::alltoallp;
-        }else if (s == "-a2avp"){
-            options.algorithm = reshape_algorithm::alltoallvp;
+        }else if (s == "-a2a_p"){
+            options.algorithm = reshape_algorithm::alltoall_p;
+        }else if (s == "-a2av_p"){
+            options.algorithm = reshape_algorithm::alltoallv_p;
         }else if (s == "-p2p"){
             options.algorithm = reshape_algorithm::p2p;
         }else if (s == "-p2p_pl"){

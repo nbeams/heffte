@@ -769,7 +769,7 @@ std::unique_ptr<reshape3d_base<index>> make_reshape3d(typename backend::device_i
                 return make_reshape3d_alltoallv<location_tag, transpose_packer, index>(stream, input_boxes, output_boxes,
                                                                                        options.use_gpu_aware, comm);
             }
-	}else if (options.algorithm == reshape_algorithm::alltoallvp){
+	}else if (options.algorithm == reshape_algorithm::alltoallv_p){
             if (input_boxes[0].ordered_same_as(output_boxes[0])){
                 return make_reshape3d_alltoallvp<location_tag, direct_packer, index>(stream, input_boxes, output_boxes,
                                                                                     options.use_gpu_aware, comm);
@@ -785,7 +785,7 @@ std::unique_ptr<reshape3d_base<index>> make_reshape3d(typename backend::device_i
                 return make_reshape3d_alltoall<location_tag, transpose_packer, index>(stream, input_boxes, output_boxes,
                                                                                       options.use_gpu_aware, comm);
             }
-        }else if (options.algorithm == reshape_algorithm::alltoallp){
+        }else if (options.algorithm == reshape_algorithm::alltoall_p){
             if (input_boxes[0].ordered_same_as(output_boxes[0])){
                 return make_reshape3d_alltoallp<location_tag, direct_packer, index>(stream, input_boxes, output_boxes,
                                                                                    options.use_gpu_aware, comm);
