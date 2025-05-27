@@ -220,7 +220,7 @@ template<typename device_type> void sync_if_not_default(device_type const *devic
 template<typename location_tag, template<typename device> class packer, typename index>
 reshape3d_alltoall<location_tag, packer, index>::reshape3d_alltoall(
                    typename backend::device_instance<location_tag>::stream_type q,
-                   int cinput_size, int coutput_size, bool gpu_aware, MPI_Comm ccomm,
+                   int cinput_size, int coutput_size, reshape_algorithm alg, bool gpu_aware, MPI_Comm ccomm,
                    std::vector<pack_plan_3d<index>> &&cpackplan, std::vector<pack_plan_3d<index>> &&cunpackplan,
                    std::vector<int> &&csend_offset, std::vector<int> &&crecv_offset,
                    int cnum_entries
@@ -228,7 +228,8 @@ reshape3d_alltoall<location_tag, packer, index>::reshape3d_alltoall(
                    reshape3d_base<index>(cinput_size, coutput_size),
                    backend::device_instance<location_tag>(q),
                    comm(ccomm), me(mpi::comm_rank(comm)), nprocs(mpi::comm_size(comm)),
-                   use_gpu_aware( (disable_gpu_aware::value) ? false : gpu_aware ),
+                   last_used_send(nullptr), last_used_recv(nullptr), last_batch_size(0),
+                   request_is_initialized(false), algorithm(alg), use_gpu_aware( (disable_gpu_aware::value) ? false : gpu_aware ),
                    packplan(std::move(cpackplan)), unpackplan(std::move(cunpackplan)),
                    send_offset(std::move(csend_offset)), recv_offset(std::move(crecv_offset)),
                    num_entries(cnum_entries)
@@ -268,10 +269,42 @@ void reshape3d_alltoall<location_tag, packer, index>::apply_base(int batch_size,
     }
     #endif
 
-    { add_trace name("all2all");
-        MPI_Alltoall(send_buffer, batch_size * num_entries, mpi::type_from<scalar_type>(),
-                     recv_buffer, batch_size * num_entries, mpi::type_from<scalar_type>(),
-                     comm);
+    if (algorithm == reshape_algorithm::alltoall_p){ // Use persistent collectives
+        // If we already have a persistent collective active, check if anything has
+        // changed
+        if (this->request_is_initialized){
+            if ((this->last_used_send != (char*) send_buffer) || (this->last_used_recv != (char*) recv_buffer) ||
+                    (this->last_batch_size != batch_size)){
+                    { add_trace name("all2all_p-free");
+                        MPI_Request_free(&(this->request));
+                        this->request_is_initialized = false;
+                    }
+            }
+        }
+
+        if (!this->request_is_initialized){
+            { add_trace name("all2all_p-init");
+                this->last_used_send = (char*) send_buffer;
+                this->last_used_recv = (char*) recv_buffer;
+                this->last_batch_size = batch_size;
+                MPI_Alltoall_init(send_buffer, batch_size * num_entries, mpi::type_from<scalar_type>(),
+                                  recv_buffer, batch_size * num_entries, mpi::type_from<scalar_type>(),
+                                  comm, MPI_INFO_NULL, &this->request);
+                this->request_is_initialized = true;
+            }
+        }
+
+        { add_trace name("all2all_p");
+            MPI_Start(&(this->request));
+            MPI_Wait(&(this->request), MPI_STATUS_IGNORE);
+        }
+
+    }else{ // Standard Alltoall
+      { add_trace name("all2all");
+          MPI_Alltoall(send_buffer, batch_size * num_entries, mpi::type_from<scalar_type>(),
+                       recv_buffer, batch_size * num_entries, mpi::type_from<scalar_type>(),
+                       comm);
+      }
     }
 
     #ifdef Heffte_ENABLE_GPU
@@ -302,7 +335,7 @@ void reshape3d_alltoall<location_tag, packer, index>::apply_base(int batch_size,
 template<typename location_tag, template<typename device> class packer, typename index> std::unique_ptr<reshape3d_alltoall<location_tag, packer, index>>
 make_reshape3d_alltoall(typename backend::device_instance<location_tag>::stream_type q,
                         std::vector<box3d<index>> const &input_boxes, std::vector<box3d<index>> const &output_boxes,
-                        bool uses_gpu_aware, MPI_Comm const comm){
+                        reshape_algorithm alg, bool uses_gpu_aware, MPI_Comm const comm){
     int const me = mpi::comm_rank(comm);
 
     std::vector<int> send_proc;
@@ -333,154 +366,7 @@ make_reshape3d_alltoall(typename backend::device_instance<location_tag>::stream_
     else
         return std::unique_ptr<reshape3d_alltoall<location_tag, packer, index>>(new reshape3d_alltoall<location_tag, packer, index>(
             q, input_boxes[me].count(), output_boxes[me].count(),
-            uses_gpu_aware, new_comm,
-            std::move(packplans), std::move(unpackplans), std::move(send_offset), std::move(recv_offset),
-            get_max_size(group, input_boxes, output_boxes)
-                                                       ));
-
-}
-
-template<typename location_tag, template<typename device> class packer, typename index>
-reshape3d_alltoallp<location_tag, packer, index>::reshape3d_alltoallp(
-                   typename backend::device_instance<location_tag>::stream_type q,
-                   int cinput_size, int coutput_size, bool gpu_aware, MPI_Comm ccomm,
-                   std::vector<pack_plan_3d<index>> &&cpackplan, std::vector<pack_plan_3d<index>> &&cunpackplan,
-                   std::vector<int> &&csend_offset, std::vector<int> &&crecv_offset,
-                   int cnum_entries
-                                                                  ) :
-                   reshape3d_base<index>(cinput_size, coutput_size),
-                   backend::device_instance<location_tag>(q),
-                   comm(ccomm), last_used_send(nullptr), last_used_recv(nullptr),
-		   last_batch_size(0), request_is_initialized(false), me(mpi::comm_rank(comm)), nprocs(mpi::comm_size(comm)),
-                   use_gpu_aware( (disable_gpu_aware::value) ? false : gpu_aware ),
-                   packplan(std::move(cpackplan)), unpackplan(std::move(cunpackplan)),
-                   send_offset(std::move(csend_offset)), recv_offset(std::move(crecv_offset)),
-                   num_entries(cnum_entries)
-{}
-
-template<typename location_tag, template<typename device> class packer, typename index>
-template<typename scalar_type>
-void reshape3d_alltoallp<location_tag, packer, index>::apply_base(int batch_size, scalar_type const source[], scalar_type destination[], scalar_type workspace[]) const{
-
-    scalar_type *send_buffer = workspace;
-    scalar_type *recv_buffer = workspace + batch_size * num_entries * packplan.size();
-
-    packer<location_tag> packit;
-
-    int offset = 0;
-
-    { add_trace name("packing");
-        for(size_t i=0; i<packplan.size(); i++){
-            if (packplan[i].size[0] > 0){
-                for(int j=0; j<batch_size; j++){
-                    packit.pack(this->stream(), packplan[i], source + send_offset[i] + j * this->input_size, send_buffer + offset);
-                    offset += num_entries;
-                }
-            }else{
-                offset += batch_size * num_entries;
-            }
-        }
-        this->synchronize_device();
-    }
-
-    #ifdef Heffte_ENABLE_GPU
-    if (std::is_same<location_tag, tag::gpu>::value and not use_gpu_aware){
-        scalar_type *temp = this->template cpu_send_buffer<scalar_type>(batch_size * num_entries * packplan.size());
-        gpu::transfer::unload(this->stream(), send_buffer, batch_size * num_entries * packplan.size(), temp);
-        send_buffer = temp;
-        recv_buffer = this->template cpu_recv_buffer<scalar_type>(batch_size * num_entries * packplan.size());
-    }
-    #endif
-
-    // If we already have a persistent collective active, check if anything has
-    // changed
-    if (this->request_is_initialized){
-        if ((this->last_used_send != (char*) send_buffer) || (this->last_used_recv != (char*) recv_buffer) ||
-                (this->last_batch_size != batch_size)){
-                { add_trace name("all2allp-free");
-                    MPI_Request_free(&(this->request));
-                    this->request_is_initialized = false;
-                }
-        }
-    }
-
-    if (!this->request_is_initialized){
-        { add_trace name("all2allp-init");
-            this->last_used_send = (char*) send_buffer;
-            this->last_used_recv = (char*) recv_buffer;
-            this->last_batch_size = batch_size;
-            MPI_Alltoall_init(send_buffer, batch_size * num_entries, mpi::type_from<scalar_type>(),
-                              recv_buffer, batch_size * num_entries, mpi::type_from<scalar_type>(),
-                              comm, MPI_INFO_NULL, &this->request);
-            this->request_is_initialized = true;
-	}
-    }
-
-    { add_trace name("all2allp");
-        MPI_Start(&(this->request));
-	MPI_Wait(&(this->request), MPI_STATUS_IGNORE);
-    }
-
-    #ifdef Heffte_ENABLE_GPU
-    if (std::is_same<location_tag, tag::gpu>::value and not use_gpu_aware){
-        scalar_type* temp = workspace + batch_size * num_entries * packplan.size();
-        gpu::transfer::load(this->stream(), recv_buffer, batch_size * num_entries * packplan.size(), temp);
-        recv_buffer = temp;
-    }
-    #endif
-
-    offset = 0;
-    { add_trace name("unpacking");
-        for(size_t i=0; i<unpackplan.size(); i++){
-            if (unpackplan[i].size[0] > 0){
-                for(int j=0; j<batch_size; j++){
-                    packit.unpack(this->stream(), unpackplan[i],
-                                  recv_buffer + offset,
-                                  destination + recv_offset[i] + j * this->output_size);
-                    offset += num_entries;
-                }
-            }else{
-                offset += batch_size * num_entries;
-            }
-        }
-    }
-}
-
-template<typename location_tag, template<typename device> class packer, typename index> std::unique_ptr<reshape3d_alltoallp<location_tag, packer, index>>
-make_reshape3d_alltoallp(typename backend::device_instance<location_tag>::stream_type q,
-                        std::vector<box3d<index>> const &input_boxes, std::vector<box3d<index>> const &output_boxes,
-                        bool uses_gpu_aware, MPI_Comm const comm){
-    int const me = mpi::comm_rank(comm);
-
-    std::vector<int> send_proc;
-    if (not input_boxes[me].empty()) send_proc.push_back(me);
-    std::vector<int> recv_proc;
-    if (not output_boxes[me].empty()) recv_proc.push_back(me);
-    std::vector<int> group = a2a_group(send_proc, recv_proc, input_boxes, output_boxes);
-
-    std::vector<pack_plan_3d<index>> packplans, unpackplans;
-    std::vector<int> send_offset, recv_offset;
-
-    if (not group.empty()){
-        constexpr bool transpose = true;
-        constexpr bool non_transpose = false;
-
-        compute_overlap_map_all2all_pack<index, non_transpose>(group, input_boxes[me], output_boxes, send_offset, packplans);
-        if (std::is_same<packer<location_tag>, direct_packer<location_tag>>::value){
-            compute_overlap_map_all2all_pack<index, non_transpose>(group, output_boxes[me], input_boxes, recv_offset, unpackplans);
-        }else{
-            compute_overlap_map_all2all_pack<index, transpose>(group, output_boxes[me], input_boxes, recv_offset, unpackplans);
-        }
-    }
-
-    MPI_Comm new_comm = mpi::new_comm_from_group(group, comm);
-
-    if (group.empty())
-        return std::unique_ptr<reshape3d_alltoallp<location_tag, packer, index>>();
-    else
-        return std::unique_ptr<reshape3d_alltoallp<location_tag, packer, index>>(new reshape3d_alltoallp<location_tag, packer, index>(
-            q, input_boxes[me].count(), output_boxes[me].count(),
-            uses_gpu_aware, new_comm,
+            alg, uses_gpu_aware, new_comm,
             std::move(packplans), std::move(unpackplans), std::move(send_offset), std::move(recv_offset),
             get_max_size(group, input_boxes, output_boxes)
                                                        ));
@@ -490,7 +376,7 @@ make_reshape3d_alltoallp(typename backend::device_instance<location_tag>::stream
 template<typename location_tag, template<typename device> class packer, typename index>
 reshape3d_alltoallv<location_tag, packer, index>::reshape3d_alltoallv(
                         typename backend::device_instance<location_tag>::stream_type q,
-                        int cinput_size, int coutput_size,
+                        int cinput_size, int coutput_size, reshape_algorithm alg,
                         bool gpu_aware, MPI_Comm new_comm, std::vector<int> const &pgroup,
                         std::vector<int> &&csend_offset, std::vector<int> &&csend_size, std::vector<int> const &send_proc,
                         std::vector<int> &&crecv_offset, std::vector<int> &&crecv_size, std::vector<int> const &recv_proc,
@@ -499,14 +385,24 @@ reshape3d_alltoallv<location_tag, packer, index>::reshape3d_alltoallv(
     reshape3d_base<index>(cinput_size, coutput_size),
     backend::device_instance<location_tag>(q),
     comm(new_comm), me(mpi::comm_rank(comm)), nprocs(mpi::comm_size(comm)),
-    use_gpu_aware( (disable_gpu_aware::value) ? false : gpu_aware ),
+    last_used_send(nullptr), last_used_recv(nullptr),
+    last_batch_size(0), request_is_initialized(false),
+    algorithm(alg), use_gpu_aware( (disable_gpu_aware::value) ? false : gpu_aware ),
     send_offset(std::move(csend_offset)), send_size(std::move(csend_size)),
     recv_offset(std::move(crecv_offset)), recv_size(std::move(crecv_size)),
     send_total(std::accumulate(send_size.begin(), send_size.end(), 0)),
     recv_total(std::accumulate(recv_size.begin(), recv_size.end(), 0)),
     packplan(std::move(cpackplan)), unpackplan(std::move(cunpackplan)),
     send(pgroup, send_proc, send_size),
-    recv(pgroup, recv_proc, recv_size)
+    recv(pgroup, recv_proc, recv_size),
+    batched_send((alg == reshape_algorithm::alltoallv_p) ? 
+		    std::move(iotripple(pgroup, send_proc, send_size)) :
+                    std::move(iotripple(std::vector<int>(), std::vector<int>(), std::vector<int>()))
+		),
+    batched_recv((alg == reshape_algorithm::alltoallv_p) ? 
+		    std::move(iotripple(pgroup, send_proc, send_size)) :
+                    std::move(iotripple(std::vector<int>(), std::vector<int>(), std::vector<int>()))
+		)
 {}
 
 template<typename location_tag, template<typename device> class packer, typename index>
@@ -544,25 +440,71 @@ void reshape3d_alltoallv<location_tag, packer, index>::apply_base(int batch_size
     }
     #endif
 
-    { add_trace name("all2allv");
-        if (batch_size == 1){
-            MPI_Alltoallv(send_buffer, send.counts.data(), send.displacements.data(), mpi::type_from<scalar_type>(),
-                          recv_buffer, recv.counts.data(), recv.displacements.data(), mpi::type_from<scalar_type>(),
-                          comm);
-        }else{
-            std::vector<int> send_counts = send.counts;
-            std::vector<int> send_displacements = send.displacements;
-            std::vector<int> recv_counts = recv.counts;
-            std::vector<int> recv_displacements = recv.displacements;
-            for(size_t i=0; i<send_counts.size(); i++){
-                send_counts[i] *= batch_size;
-                send_displacements[i] *= batch_size;
-                recv_counts[i] *= batch_size;
-                recv_displacements[i] *= batch_size;
+    if (algorithm == reshape_algorithm::alltoallv_p){ // Use persistent collectives
+        // If we already have a persistent collective active, check if anything has
+        // changed
+        if (this->request_is_initialized){
+            if ((this->last_used_send != (char*) send_buffer) || (this->last_used_recv != (char*) recv_buffer) ||
+                    (this->last_batch_size != batch_size)){
+                    { add_trace name("all2allv_p-free");
+                        MPI_Request_free(&(this->request));
+                        this->request_is_initialized = false;
+                    }
             }
-            MPI_Alltoallv(send_buffer, send_counts.data(), send_displacements.data(), mpi::type_from<scalar_type>(),
-                          recv_buffer, recv_counts.data(), recv_displacements.data(), mpi::type_from<scalar_type>(),
-                          comm);
+        }
+
+        if (!this->request_is_initialized){
+            { add_trace name("all2allv_p-init");
+                if (batch_size > 1){
+                    if (this->last_batch_size != batch_size){
+                        for(size_t i=0; i<send.counts.size(); i++){
+                            batched_send.counts[i] = send.counts[i] * batch_size;
+                            batched_send.displacements[i] = send.displacements[i] * batch_size;
+                            batched_recv.counts[i] = recv.counts[i] * batch_size;
+                            batched_recv.displacements[i] = recv.displacements[i] * batch_size;
+                        }
+                    }
+                    MPI_Alltoallv_init(send_buffer, batched_send.counts.data(), batched_send.displacements.data(),
+                                       mpi::type_from<scalar_type>(),
+                                       recv_buffer, batched_recv.counts.data(), batched_recv.displacements.data(),
+                                       mpi::type_from<scalar_type>(), comm, MPI_INFO_NULL, &this->request);
+                }else{
+                    MPI_Alltoallv_init(send_buffer, send.counts.data(), send.displacements.data(), mpi::type_from<scalar_type>(),
+                                       recv_buffer, recv.counts.data(), recv.displacements.data(), mpi::type_from<scalar_type>(),
+                                       comm, MPI_INFO_NULL, &this->request);
+                }
+                this->last_used_send = (char*) send_buffer;
+                this->last_used_recv = (char*) recv_buffer;
+                this->last_batch_size = batch_size;
+                this->request_is_initialized = true;
+            }
+        }
+
+        { add_trace name("all2allv_p");
+            MPI_Start(&(this->request));
+            MPI_Wait(&(this->request), MPI_STATUS_IGNORE);
+        }
+    }else{ // Standard Alltoallv
+        { add_trace name("all2allv");
+            if (batch_size == 1){
+                MPI_Alltoallv(send_buffer, send.counts.data(), send.displacements.data(), mpi::type_from<scalar_type>(),
+                              recv_buffer, recv.counts.data(), recv.displacements.data(), mpi::type_from<scalar_type>(),
+                              comm);
+            }else{
+                std::vector<int> send_counts = send.counts;
+                std::vector<int> send_displacements = send.displacements;
+                std::vector<int> recv_counts = recv.counts;
+                std::vector<int> recv_displacements = recv.displacements;
+                for(size_t i=0; i<send_counts.size(); i++){
+                    send_counts[i] *= batch_size;
+                    send_displacements[i] *= batch_size;
+                    recv_counts[i] *= batch_size;
+                    recv_displacements[i] *= batch_size;
+                }
+                MPI_Alltoallv(send_buffer, send_counts.data(), send_displacements.data(), mpi::type_from<scalar_type>(),
+                              recv_buffer, recv_counts.data(), recv_displacements.data(), mpi::type_from<scalar_type>(),
+                              comm);
+            }
         }
     }
 
@@ -594,7 +536,7 @@ std::unique_ptr<reshape3d_alltoallv<location_tag, packer, index>>
 make_reshape3d_alltoallv(typename backend::device_instance<location_tag>::stream_type q,
                          std::vector<box3d<index>> const &input_boxes,
                          std::vector<box3d<index>> const &output_boxes,
-                         bool uses_gpu_aware,
+                         reshape_algorithm alg, bool uses_gpu_aware,
                          MPI_Comm const comm){
 
     int const me = mpi::comm_rank(comm);
@@ -637,191 +579,7 @@ make_reshape3d_alltoallv(typename backend::device_instance<location_tag>::stream
         return std::unique_ptr<reshape3d_alltoallv<location_tag, packer, index>>();
     else
         return std::unique_ptr<reshape3d_alltoallv<location_tag, packer, index>>(new reshape3d_alltoallv<location_tag, packer, index>(
-        q, inbox.count(), outbox.count(),
-        uses_gpu_aware, new_comm, pgroup,
-        std::move(send_offset), std::move(send_size), send_proc,
-        std::move(recv_offset), std::move(recv_size), recv_proc,
-        std::move(packplan), std::move(unpackplan)
-                                                       ));
-}
-
-template<typename location_tag, template<typename device> class packer, typename index>
-reshape3d_alltoallvp<location_tag, packer, index>::reshape3d_alltoallvp(
-                        typename backend::device_instance<location_tag>::stream_type q,
-                        int cinput_size, int coutput_size,
-                        bool gpu_aware, MPI_Comm new_comm, std::vector<int> const &pgroup,
-                        std::vector<int> &&csend_offset, std::vector<int> &&csend_size, std::vector<int> const &send_proc,
-                        std::vector<int> &&crecv_offset, std::vector<int> &&crecv_size, std::vector<int> const &recv_proc,
-                        std::vector<pack_plan_3d<index>> &&cpackplan, std::vector<pack_plan_3d<index>> &&cunpackplan
-                                                                ) :
-    reshape3d_base<index>(cinput_size, coutput_size),
-    backend::device_instance<location_tag>(q),
-    comm(new_comm), last_used_send(nullptr), last_used_recv(nullptr),
-    last_batch_size(0), request_is_initialized(false),
-    me(mpi::comm_rank(comm)), nprocs(mpi::comm_size(comm)),
-    use_gpu_aware( (disable_gpu_aware::value) ? false : gpu_aware ),
-    send_offset(std::move(csend_offset)), send_size(std::move(csend_size)),
-    recv_offset(std::move(crecv_offset)), recv_size(std::move(crecv_size)),
-    send_total(std::accumulate(send_size.begin(), send_size.end(), 0)),
-    recv_total(std::accumulate(recv_size.begin(), recv_size.end(), 0)),
-    packplan(std::move(cpackplan)), unpackplan(std::move(cunpackplan)),
-    send(pgroup, send_proc, send_size),
-    recv(pgroup, recv_proc, recv_size),
-    batched_send(pgroup, send_proc, send_size),
-    batched_recv(pgroup, recv_proc, recv_size)
-{}
-
-template<typename location_tag, template<typename device> class packer, typename index>
-template<typename scalar_type>
-void reshape3d_alltoallvp<location_tag, packer, index>::apply_base(int batch_size, scalar_type const source[], scalar_type destination[], scalar_type workspace[]) const{
-
-    scalar_type *send_buffer = workspace;
-    scalar_type *recv_buffer = workspace + batch_size * this->input_size;
-
-    packer<location_tag> packit;
-
-    int offset = 0;
-
-    { add_trace name("packing");
-    for(auto isend : send.map){
-        if (isend >= 0){ // something to send
-            for(int j=0; j<batch_size; j++){
-                packit.pack(this->stream(), packplan[isend],
-                            source + send_offset[isend] + j * this->input_size,
-                            send_buffer + offset);
-                offset += send_size[isend];
-            }
-        }
-    }
-    // the synchronize_device() is needed to flush the kernels of the asynchronous packing
-    this->synchronize_device();
-    }
-
-    #ifdef Heffte_ENABLE_GPU
-    if (std::is_same<location_tag, tag::gpu>::value and not use_gpu_aware){
-        scalar_type *temp = this->template cpu_send_buffer<scalar_type>(batch_size * this->input_size);
-        gpu::transfer::unload(this->stream(), send_buffer, batch_size * this->input_size, temp);
-        send_buffer = temp;
-        recv_buffer = this->template cpu_recv_buffer<scalar_type>(batch_size * this->output_size);
-    }
-    #endif
-
-    // If we already have a persistent collective active, check if anything has
-    // changed
-    if (this->request_is_initialized){
-        if ((this->last_used_send != (char*) send_buffer) || (this->last_used_recv != (char*) recv_buffer) ||
-                (this->last_batch_size != batch_size)){
-                { add_trace name("all2allvp-free");
-                    MPI_Request_free(&(this->request));
-                    this->request_is_initialized = false;
-                }
-        }
-    }
-
-    if (!this->request_is_initialized){
-        { add_trace name("all2allvp-init");
-            if (batch_size > 1){
-		if (this->last_batch_size != batch_size){
-                    for(size_t i=0; i<send.counts.size(); i++){
-                        batched_send.counts[i] = send.counts[i] * batch_size;
-                        batched_send.displacements[i] = send.displacements[i] * batch_size;
-                        batched_recv.counts[i] = recv.counts[i] * batch_size;
-                        batched_recv.displacements[i] = recv.displacements[i] * batch_size;
-                    }
-		}
-                MPI_Alltoallv_init(send_buffer, batched_send.counts.data(), batched_send.displacements.data(),
-				   mpi::type_from<scalar_type>(),
-                                   recv_buffer, batched_recv.counts.data(), batched_recv.displacements.data(),
-				   mpi::type_from<scalar_type>(), comm, MPI_INFO_NULL, &this->request);
-            }else{
-                MPI_Alltoallv_init(send_buffer, send.counts.data(), send.displacements.data(), mpi::type_from<scalar_type>(),
-                                   recv_buffer, recv.counts.data(), recv.displacements.data(), mpi::type_from<scalar_type>(),
-                                   comm, MPI_INFO_NULL, &this->request);
-	    }
-	    this->last_used_send = (char*) send_buffer;
-            this->last_used_recv = (char*) recv_buffer;
-            this->last_batch_size = batch_size;
-            this->request_is_initialized = true;
-	}
-    }
-
-    { add_trace name("all2allvp");
-        MPI_Start(&(this->request));
-	MPI_Wait(&(this->request), MPI_STATUS_IGNORE);
-    }
-
-    #ifdef Heffte_ENABLE_GPU
-    if (std::is_same<location_tag, tag::gpu>::value and not use_gpu_aware){
-        scalar_type* temp = workspace + batch_size * this->input_size;
-        gpu::transfer::load(this->stream(), recv_buffer, batch_size * this->output_size, temp);
-        recv_buffer = temp;
-    }
-    #endif
-
-    offset = 0;
-    { add_trace name("unpacking");
-    for(auto irecv : recv.map){
-        if (irecv >= 0){ // something received
-            for(int j=0; j<batch_size; j++){
-                packit.unpack(this->stream(), unpackplan[irecv],
-                              recv_buffer + offset,
-                              destination + recv_offset[irecv] + j * this->output_size);
-                offset += recv_size[irecv];
-            }
-        }
-    }
-    }
-}
-
-template<typename location_tag, template<typename device> class packer, typename index>
-std::unique_ptr<reshape3d_alltoallvp<location_tag, packer, index>>
-make_reshape3d_alltoallvp(typename backend::device_instance<location_tag>::stream_type q,
-                         std::vector<box3d<index>> const &input_boxes,
-                         std::vector<box3d<index>> const &output_boxes,
-                         bool uses_gpu_aware,
-                         MPI_Comm const comm){
-
-    int const me = mpi::comm_rank(comm);
-    int const nprocs = mpi::comm_size(comm);
-
-    std::vector<pack_plan_3d<index>> packplan, unpackplan; // will be moved into the class
-    std::vector<int> send_offset;
-    std::vector<int> send_size;
-    std::vector<int> send_proc;
-    std::vector<int> recv_offset;
-    std::vector<int> recv_size;
-    std::vector<int> recv_proc;
-
-    box3d<index> outbox = output_boxes[me];
-    box3d<index> inbox  = input_boxes[me];
-
-    // number of ranks that need data from me
-    int nsend = count_collisions(output_boxes, inbox);
-
-    if (nsend > 0) // if others need something from me, prepare the corresponding sizes and plans
-        compute_overlap_map_direct_pack(me, nprocs, input_boxes[me], output_boxes, send_proc, send_offset, send_size, packplan);
-
-    // number of ranks that I need data from
-    int nrecv = count_collisions(input_boxes, outbox);
-
-    if (nrecv > 0){ // if I need something from others, prepare the corresponding sizes and plans
-        // the transpose logic is included in the unpack procedure, direct_packer does not transpose
-        if (std::is_same<packer<location_tag>, direct_packer<location_tag>>::value){
-            compute_overlap_map_direct_pack(me, nprocs, output_boxes[me], input_boxes, recv_proc, recv_offset, recv_size, unpackplan);
-        }else{
-            compute_overlap_map_transpose_pack(me, nprocs, output_boxes[me], input_boxes, recv_proc, recv_offset, recv_size, unpackplan);
-        }
-    }
-
-    std::vector<int> pgroup = a2a_group(send_proc, recv_proc, input_boxes, output_boxes);
-
-    MPI_Comm new_comm = mpi::new_comm_from_group(pgroup, comm);
-
-    if (pgroup.empty())
-        return std::unique_ptr<reshape3d_alltoallvp<location_tag, packer, index>>();
-    else
-        return std::unique_ptr<reshape3d_alltoallvp<location_tag, packer, index>>(new reshape3d_alltoallvp<location_tag, packer, index>(
-        q, inbox.count(), outbox.count(),
+        q, inbox.count(), outbox.count(), alg,
         uses_gpu_aware, new_comm, pgroup,
         std::move(send_offset), std::move(send_size), send_proc,
         std::move(recv_offset), std::move(recv_size), recv_proc,
@@ -1111,17 +869,15 @@ template void alg<some_backend, transpose_packer, index>::apply_base<std::comple
  \
 template std::unique_ptr<alg<some_backend, direct_packer, index>> \
 make_alg<some_backend, direct_packer, index>(typename backend::device_instance<some_backend>::stream_type, std::vector<box3d<index>> const&, \
-                                                           std::vector<box3d<index>> const&, bool, MPI_Comm const); \
+                                                           std::vector<box3d<index>> const&, reshape_algorithm, bool, MPI_Comm const); \
 template std::unique_ptr<alg<some_backend, transpose_packer, index>> \
 make_alg<some_backend, transpose_packer, index>(typename backend::device_instance<some_backend>::stream_type, std::vector<box3d<index>> const&, \
-                                                              std::vector<box3d<index>> const&, bool, MPI_Comm const); \
+                                                              std::vector<box3d<index>> const&, reshape_algorithm, bool, MPI_Comm const); \
 
 
 #define heffte_instantiate_reshape3d(some_backend, index) \
 heffte_instantiate_reshape3d_algorithm(reshape3d_alltoall, make_reshape3d_alltoall, some_backend, index) \
 heffte_instantiate_reshape3d_algorithm(reshape3d_alltoallv, make_reshape3d_alltoallv, some_backend, index) \
-heffte_instantiate_reshape3d_algorithm(reshape3d_alltoallp, make_reshape3d_alltoallp, some_backend, index) \
-heffte_instantiate_reshape3d_algorithm(reshape3d_alltoallvp, make_reshape3d_alltoallvp, some_backend, index) \
  \
 template void reshape3d_pointtopoint<some_backend, direct_packer, index>::apply_base<float>(int, float const[], float[], float[]) const; \
 template void reshape3d_pointtopoint<some_backend, direct_packer, index>::apply_base<double>(int, double const[], double[], double[]) const; \
