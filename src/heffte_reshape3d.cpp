@@ -599,11 +599,14 @@ reshape3d_pointtopoint<location_tag, packer, index>::reshape3d_pointtopoint(
     reshape3d_base<index>(cinput_size, coutput_size),
     backend::device_instance<location_tag>(q),
     comm(ccomm), me(mpi::comm_rank(comm)), nprocs(mpi::comm_size(comm)),
+    last_used_send(nullptr), last_used_recv(nullptr), last_batch_size(0),
     self_to_self(not crecv_proc.empty() and (crecv_proc.back() == me)), // check whether we should include "me" in the communication scheme
     algorithm(alg),
     use_gpu_aware( (disable_gpu_aware::value) ? false : gpu_aware ),
     requests(crecv_proc.size() + ((self_to_self) ? -1 : 0)), // remove 1 if using self-to-self
     isends(csend_proc.size() + ((self_to_self) ? -1 : 0)), // remove 1 if using self-to-self
+    persistent_reqs_initialized(false),
+    persistent_isends_initialized(false),
     send_proc(std::move(csend_proc)), send_offset(std::move(csend_offset)), send_size(std::move(csend_size)),
     recv_proc(std::move(crecv_proc)), recv_offset(std::move(crecv_offset)), recv_size(std::move(crecv_size)),
     recv_loc(std::move(crecv_loc)),
@@ -634,11 +637,52 @@ void reshape3d_pointtopoint<location_tag, packer, index>::no_gpuaware_send_recv(
     // synchronize before starting the receives, because kernels from an other reshape might
     // still be running, using the workspace
     this->synchronize_device();
-    // queue the receive messages, using asynchronous receive
-    for(size_t i=0; i<requests.size(); i++){
-        heffte::add_trace name("irecv " + std::to_string(batch_size * recv_size[i]) + " from " + std::to_string(recv_proc[i]));
-        MPI_Irecv(cpu_recv + batch_size * recv_loc[i], batch_size * recv_size[i], mpi::type_from<scalar_type>(),
-                  recv_proc[i], 0, comm, &requests[i]);
+    // If we already have persistent communication requests active, check if anything has changed
+    if (algorithm == reshape_algorithm::p2p_p){
+       if (this->persistent_reqs_initialized){
+          if ((this->last_used_recv != (char*) cpu_recv) || (this->last_batch_size != batch_size)){
+            { add_trace name("recv_p-free");
+                for(size_t i = 0; i<requests.size(); i++){
+                    MPI_Request_free(&requests[i]);
+                }
+                this->persistent_reqs_initialized = false;
+            }
+          }
+       }
+       if (this->persistent_isends_initialized){
+          if ((this->last_used_send != (char*) cpu_send) || (this->last_batch_size != batch_size)){
+            { add_trace name("send_p-free");
+                for(size_t i = 0; i<isends.size(); i++){
+                    MPI_Request_free(&isends[i]);
+                }
+                this->persistent_isends_initialized = false;
+            }
+          }
+       }
+       this->last_used_send = (char*) cpu_send;
+       this->last_used_recv = (char*) cpu_recv;
+       this->last_batch_size = batch_size;
+       // Create new persistent requests, if necessary
+       if (!this->persistent_reqs_initialized){
+          for(size_t i=0; i<requests.size(); i++){
+              heffte::add_trace name("recv_p-init " + std::to_string(batch_size * recv_size[i]) + " from " + std::to_string(recv_proc[i]));
+              MPI_Recv_init(cpu_recv + batch_size * recv_loc[i], batch_size * recv_size[i], mpi::type_from<scalar_type>(),
+                       recv_proc[i], 0, comm, &requests[i]);
+          }
+	  this->persistent_reqs_initialized = true;
+       }
+       if (requests.size() > 0) {
+          { heffte::add_trace name("recv_p-startall");
+          MPI_Startall(requests.size(), requests.data()); 
+          }
+       }
+    }else{
+       // queue the receive messages, using asynchronous receive
+       for(size_t i=0; i<requests.size(); i++){
+           heffte::add_trace name("irecv " + std::to_string(batch_size * recv_size[i]) + " from " + std::to_string(recv_proc[i]));
+           MPI_Irecv(cpu_recv + batch_size * recv_loc[i], batch_size * recv_size[i], mpi::type_from<scalar_type>(),
+                     recv_proc[i], 0, comm, &requests[i]);
+       }
     }
 
     // perform the send commands, using blocking send
@@ -660,6 +704,29 @@ void reshape3d_pointtopoint<location_tag, packer, index>::no_gpuaware_send_recv(
             }
             offset += batch_size * send_size[i];
         }
+    }else if (algorithm == reshape_algorithm::p2p_p){
+        size_t offset = 0;
+        for(size_t i=0; i<send_proc.size() + ((self_to_self) ? -1 : 0); i++){
+            { heffte::add_trace name("packing");
+                for(int j=0; j<batch_size; j++){
+                    packit.pack(this->stream(), packplan[i], source + j * this->input_size + send_offset[i],
+                                send_buffer + offset + j * send_size[i]);
+                }
+
+            gpu::transfer::unload(this->stream(), send_buffer + offset, batch_size * send_size[i], cpu_send + offset);
+            }
+            if (!this->persistent_isends_initialized){
+               { heffte::add_trace name("send_p-init " + std::to_string(send_size[i]) + " for " + std::to_string(send_proc[i]));
+                 MPI_Send_init(cpu_send + offset, batch_size * send_size[i], mpi::type_from<scalar_type>(),
+                         send_proc[i], 0, comm, &isends[i]);
+               }
+	    }
+            { heffte::add_trace name("send_p " + std::to_string(batch_size * send_size[i]) + " for " + std::to_string(send_proc[i]));
+	    MPI_Start(&isends[i]);
+	    }
+            offset += batch_size * send_size[i];
+        }
+	this->persistent_isends_initialized = true;
     }else{
         for(size_t i=0; i<send_proc.size() + ((self_to_self) ? -1 : 0); i++){
             { heffte::add_trace name("packing");
@@ -708,7 +775,7 @@ void reshape3d_pointtopoint<location_tag, packer, index>::no_gpuaware_send_recv(
         }
     }
 
-    if (algorithm == reshape_algorithm::p2p_plined)
+    if (algorithm == reshape_algorithm::p2p_plined || algorithm == reshape_algorithm::p2p_p)
         MPI_Waitall(isends.size(), isends.data(), MPI_STATUS_IGNORE);
 }
 #endif
@@ -732,11 +799,52 @@ void reshape3d_pointtopoint<location_tag, packer, index>::apply_base(int batch_s
     // synchronize before starting the receives, because otherwise kernels could be still using
     // the workspace
     this->synchronize_device();
-    // queue the receive messages, using asynchronous receive
-    for(size_t i=0; i<requests.size(); i++){
-        heffte::add_trace name("irecv " + std::to_string(batch_size * recv_size[i]) + " from " + std::to_string(recv_proc[i]));
-        MPI_Irecv(recv_buffer + batch_size * recv_loc[i], batch_size * recv_size[i], mpi::type_from<scalar_type>(),
-                  recv_proc[i], 0, comm, &requests[i]);
+    // If we already have persistent communication requests active, check if anything has changed
+    if (algorithm == reshape_algorithm::p2p_p){
+       if (this->persistent_reqs_initialized){
+          if ((this->last_used_recv != (char*) recv_buffer) || (this->last_batch_size != batch_size)){
+            { add_trace name("recv_p-free");
+                for(size_t i = 0; i<requests.size(); i++){
+                    MPI_Request_free(&requests[i]);
+                }
+                this->persistent_reqs_initialized = false;
+            }
+          }
+       }
+       if (this->persistent_isends_initialized){
+          if ((this->last_used_send != (char*) send_buffer) || (this->last_batch_size != batch_size)){
+            { add_trace name("send_p-free");
+                for(size_t i = 0; i<isends.size(); i++){
+                    MPI_Request_free(&isends[i]);
+                }
+                this->persistent_isends_initialized = false;
+            }
+          }
+       }
+       this->last_used_send = (char*) send_buffer;
+       this->last_used_recv = (char*) recv_buffer;
+       this->last_batch_size = batch_size;
+       // Create new persistent requests, if necessary
+       if (!this->persistent_reqs_initialized){
+          for(size_t i=0; i<requests.size(); i++){
+              heffte::add_trace name("recv_p-init " + std::to_string(batch_size * recv_size[i]) + " from " + std::to_string(recv_proc[i]));
+              MPI_Recv_init(recv_buffer + batch_size * recv_loc[i], batch_size * recv_size[i], mpi::type_from<scalar_type>(),
+                       recv_proc[i], 0, comm, &requests[i]);
+          }
+	  this->persistent_reqs_initialized = true;
+       }
+       if (requests.size() > 0) {
+          { heffte::add_trace name("recv_p-startall");
+          MPI_Startall(requests.size(), requests.data());
+          }
+       }
+    }else{
+       // queue the receive messages, using asynchronous receive
+       for(size_t i=0; i<requests.size(); i++){
+           heffte::add_trace name("irecv " + std::to_string(batch_size * recv_size[i]) + " from " + std::to_string(recv_proc[i]));
+           MPI_Irecv(recv_buffer + batch_size * recv_loc[i], batch_size * recv_size[i], mpi::type_from<scalar_type>(),
+                     recv_proc[i], 0, comm, &requests[i]);
+       }
     }
 
     // perform the send commands, using blocking send
@@ -755,12 +863,24 @@ void reshape3d_pointtopoint<location_tag, packer, index>::apply_base(int batch_s
             heffte::add_trace name("isend " + std::to_string(batch_size * send_size[i]) + " for " + std::to_string(send_proc[i]));
             MPI_Isend(send_buffer + offset, batch_size * send_size[i], mpi::type_from<scalar_type>(),
                       send_proc[i], 0, comm, &isends[i]);
+        }else if (algorithm == reshape_algorithm::p2p_p){
+            if (!this->persistent_isends_initialized){
+              heffte::add_trace name("send_p-init " + std::to_string(batch_size * send_size[i]) + " for " + std::to_string(send_proc[i]));
+              MPI_Send_init(send_buffer + offset, batch_size * send_size[i], mpi::type_from<scalar_type>(),
+                        send_proc[i], 0, comm, &isends[i]);
+	    }
+            { heffte::add_trace name("send_p " + std::to_string(batch_size * send_size[i]) + " for " + std::to_string(send_proc[i]));
+	    MPI_Start(&isends[i]);
+	    }
         }else{
             heffte::add_trace name("send " + std::to_string(batch_size* send_size[i]) + " for " + std::to_string(send_proc[i]));
             MPI_Send(send_buffer + offset, batch_size * send_size[i], mpi::type_from<scalar_type>(),
                      send_proc[i], 0, comm);
         }
         offset += batch_size * send_size[i];
+    }
+    if (algorithm == reshape_algorithm::p2p_p){
+        this->persistent_isends_initialized = true;
     }
 
     if (self_to_self){ // if using self-to-self, do not invoke an MPI command
@@ -798,7 +918,7 @@ void reshape3d_pointtopoint<location_tag, packer, index>::apply_base(int batch_s
         }
     }
 
-    if (algorithm == reshape_algorithm::p2p_plined)
+    if (algorithm == reshape_algorithm::p2p_plined || algorithm == reshape_algorithm::p2p_p)
         MPI_Waitall(isends.size(), isends.data(), MPI_STATUS_IGNORE);
 }
 

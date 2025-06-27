@@ -41,6 +41,7 @@ namespace heffte {
  *      reshape_algorithm::alltoall_p         : persistent alltoall
  *      reshape_algorithm::p2p_plined         : for larger FFT, fewer MPI ranks
  *      reshape_algorithm::p2p                : for smaller FFT, fewer MPI ranks
+ *      reshape_algorithm::p2p_p              : persistent pt2pt
  * \endcode
  *
  * Note that in the GPU case, the above algorithms are also affected by the GPU latency
@@ -59,7 +60,9 @@ enum class reshape_algorithm{
     //! \brief Using MPI_Isend and MPI_Irecv, all sending receiving packing and unpacking are pipelined.
     p2p_plined = 1,
     //! \brief Using MPI_Send and MPI_Irecv, receive is pipelined with packing and sending.
-    p2p = 2
+    p2p = 2,
+    //! \brief Using persistent point-to-point communication.
+    p2p_p = 6
 };
 
 /*!
@@ -194,6 +197,7 @@ inline std::ostream & operator << (std::ostream &os, plan_options const options)
         case reshape_algorithm::alltoall_p  : algorithm = "mpi:alltoall-persistent"; break;
         case reshape_algorithm::p2p_plined  : algorithm = "mpi:point-to-point-pipelined"; break;
         case reshape_algorithm::p2p         : algorithm = "mpi:point-to-point"; break;
+        case reshape_algorithm::p2p_p       : algorithm = "mpi:point-to-point-persistent"; break;
     };
     os << "options = ("
        << ((options.use_reorder) ? "fft1d:contiguous" : "fft1d:strided") << ", "

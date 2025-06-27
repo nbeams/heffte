@@ -83,6 +83,8 @@ make_test_reshape3d(typename backend::device_instance<location_tag>::stream_type
         return make_reshape3d_pointtopoint<location_tag>(q, input_boxes, output_boxes, reshape_algorithm::p2p, true, comm);
     }else if (variant == reshape_algorithm::p2p_plined){
         return make_reshape3d_pointtopoint<location_tag>(q, input_boxes, output_boxes, reshape_algorithm::p2p_plined, true, comm);
+    }else if (variant == reshape_algorithm::p2p_p){
+        return make_reshape3d_pointtopoint<location_tag>(q, input_boxes, output_boxes, reshape_algorithm::p2p_p, true, comm);
     }
 }
 
@@ -440,6 +442,7 @@ void test_alltoone_all(){
     test_alltoone_variants<tag::cpu, reshape_algorithm::alltoallv_p>();
     test_alltoone_variants<tag::cpu, reshape_algorithm::p2p>();
     test_alltoone_variants<tag::cpu, reshape_algorithm::p2p_plined>();
+    test_alltoone_variants<tag::cpu, reshape_algorithm::p2p_p>();
     #ifdef Heffte_ENABLE_GPU
     test_alltoone_variants<tag::gpu, reshape_algorithm::alltoall>();
     test_alltoone_variants<tag::gpu, reshape_algorithm::alltoall_p>();
@@ -447,6 +450,7 @@ void test_alltoone_all(){
     test_alltoone_variants<tag::gpu, reshape_algorithm::alltoallv_p>();
     test_alltoone_variants<tag::gpu, reshape_algorithm::p2p>();
     test_alltoone_variants<tag::gpu, reshape_algorithm::p2p_plined>();
+    test_alltoone_variants<tag::gpu, reshape_algorithm::p2p_p>();
     #endif
 }
 
@@ -479,6 +483,10 @@ void perform_tests_cpu(){
             test_cpu<10, 20, 17, 2, 2, 1, double, heffte::tag::cpu, reshape_algorithm::p2p>(comm);
             test_cpu<30, 10, 10, 2, 2, 1, std::complex<float>, heffte::tag::cpu, reshape_algorithm::p2p>(comm);
             test_cpu<11, 10, 13, 2, 2, 1, std::complex<double>, heffte::tag::cpu, reshape_algorithm::p2p>(comm);
+            test_cpu<10, 13, 10, 2, 2, 1, float, heffte::tag::cpu, reshape_algorithm::p2p_p>(comm);
+            test_cpu<10, 20, 17, 2, 2, 1, double, heffte::tag::cpu, reshape_algorithm::p2p_p>(comm);
+            test_cpu<30, 10, 10, 2, 2, 1, std::complex<float>, heffte::tag::cpu, reshape_algorithm::p2p_p>(comm);
+            test_cpu<11, 10, 13, 2, 2, 1, std::complex<double>, heffte::tag::cpu, reshape_algorithm::p2p_p>(comm);
             break;
         case 12:
             test_cpu<13, 13, 10, 3, 4, 1, float, heffte::tag::cpu, reshape_algorithm::alltoall>(comm);
@@ -497,6 +505,10 @@ void perform_tests_cpu(){
             test_cpu<16, 21, 17, 2, 3, 2, double, heffte::tag::cpu, reshape_algorithm::p2p>(comm);
             test_cpu<38, 13, 20, 1, 4, 3, std::complex<float>, heffte::tag::cpu, reshape_algorithm::p2p>(comm);
             test_cpu<41, 17, 15, 3, 2, 2, std::complex<double>, heffte::tag::cpu, reshape_algorithm::p2p>(comm);
+            test_cpu<13, 13, 10, 3, 4, 1, float, heffte::tag::cpu, reshape_algorithm::p2p_p>(comm);
+            test_cpu<16, 21, 17, 2, 3, 2, double, heffte::tag::cpu, reshape_algorithm::p2p_p>(comm);
+            test_cpu<38, 13, 20, 1, 4, 3, std::complex<float>, heffte::tag::cpu, reshape_algorithm::p2p_p>(comm);
+            test_cpu<41, 17, 15, 3, 2, 2, std::complex<double>, heffte::tag::cpu, reshape_algorithm::p2p_p>(comm);
             break;
         default:
             // unknown test
@@ -532,6 +544,10 @@ void perform_tests_gpu(){
             test_gpu<10, 20, 17, 2, 2, 1, double, heffte::tag::gpu, reshape_algorithm::p2p>(comm);
             test_gpu<30, 10, 10, 2, 2, 1, std::complex<float>, heffte::tag::gpu, reshape_algorithm::p2p>(comm);
             test_gpu<11, 10, 13, 2, 2, 1, std::complex<double>, heffte::tag::gpu, reshape_algorithm::p2p>(comm);
+            test_gpu<10, 13, 10, 2, 2, 1, float, heffte::tag::gpu, reshape_algorithm::p2p_p>(comm);
+            test_gpu<10, 20, 17, 2, 2, 1, double, heffte::tag::gpu, reshape_algorithm::p2p_p>(comm);
+            test_gpu<30, 10, 10, 2, 2, 1, std::complex<float>, heffte::tag::gpu, reshape_algorithm::p2p_p>(comm);
+            test_gpu<11, 10, 13, 2, 2, 1, std::complex<double>, heffte::tag::gpu, reshape_algorithm::p2p_p>(comm);
             break;
         case 12:
             test_gpu<13, 13, 10, 3, 4, 1, float, heffte::tag::gpu, reshape_algorithm::alltoall>(comm);
@@ -550,6 +566,10 @@ void perform_tests_gpu(){
             test_gpu<16, 21, 17, 2, 3, 2, double, heffte::tag::gpu, reshape_algorithm::p2p>(comm);
             test_gpu<38, 13, 20, 1, 4, 3, std::complex<float>, heffte::tag::gpu, reshape_algorithm::p2p>(comm);
             test_gpu<41, 17, 15, 3, 2, 2, std::complex<double>, heffte::tag::gpu, reshape_algorithm::p2p>(comm);
+            test_gpu<13, 13, 10, 3, 4, 1, float, heffte::tag::gpu, reshape_algorithm::p2p_p>(comm);
+            test_gpu<16, 21, 17, 2, 3, 2, double, heffte::tag::gpu, reshape_algorithm::p2p_p>(comm);
+            test_gpu<38, 13, 20, 1, 4, 3, std::complex<float>, heffte::tag::gpu, reshape_algorithm::p2p_p>(comm);
+            test_gpu<41, 17, 15, 3, 2, 2, std::complex<double>, heffte::tag::gpu, reshape_algorithm::p2p_p>(comm);
             break;
         default:
             // unknown test
@@ -576,6 +596,8 @@ void perform_tests_reorder(){
         test_reshape_transposed<std::complex<float>, reshape_algorithm::p2p>(comm);
         test_reshape_transposed<double, reshape_algorithm::p2p_plined>(comm);
         test_reshape_transposed<std::complex<float>, reshape_algorithm::p2p_plined>(comm);
+        test_reshape_transposed<double, reshape_algorithm::p2p_p>(comm);
+        test_reshape_transposed<std::complex<float>, reshape_algorithm::p2p_p>(comm);
     }
 }
 

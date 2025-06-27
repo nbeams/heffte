@@ -87,6 +87,7 @@ template<> std::string get_description<reshape_algorithm::alltoallv_p>(){ return
 template<> std::string get_description<reshape_algorithm::alltoall_p>(){ return "heffte::reshape3d_alltoall (persistent)"; }
 template<> std::string get_description<reshape_algorithm::p2p>(){ return "heffte::reshape3d_pointtopoint"; }
 template<> std::string get_description<reshape_algorithm::p2p_plined>(){ return "heffte::reshape3d_p2p (plined)"; }
+template<> std::string get_description<reshape_algorithm::p2p_p>(){ return "heffte::reshape3d_p2p (persistent)"; }
 
 template<typename scalar_variant = int, typename mpi_tag = using_mpi, typename backend_tag = void>
 struct current_test{
@@ -307,6 +308,8 @@ heffte::plan_options args_to_options(std::deque<std::string> const &args){
             options.algorithm = reshape_algorithm::p2p;
         }else if (s == "-p2p_pl"){
             options.algorithm = reshape_algorithm::p2p_plined;
+        }else if (s == "-p2p_p"){
+            options.algorithm = reshape_algorithm::p2p_p;
         }else if (s == "-pencils"){
             options.use_pencils = true;
         }else if (s == "-slabs"){
