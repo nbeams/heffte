@@ -16,6 +16,8 @@
 #include <cuda.h>
 #endif
 
+#define PI 3.141592653589793
+
 template<typename scalar_type, typename index>
 std::vector<scalar_type> make_data(box3d<index> const world){
     std::minstd_rand park_miller(4242);
@@ -61,9 +63,12 @@ std::vector<scalar_type> make_data(box3d<index> const local,
           y = domain_limits[2] + y_scaling * indices[y_order];
           z = domain_limits[4] + z_scaling * indices[z_order];
 	  // local index for this process's result vector
-	  index ind = (k - local.low[local.order[2]]) * plane + (j - local.low[local.order[1]]) * line + i;
+	  index ind = (k - local.low[local.order[2]]) * plane + (j - local.low[local.order[1]]) * line +
+		  i - local.low[local.order[0]];
 	  // set result as function of x, y, and z
-          result[ind] = x * y * z;
+          result[ind] = std::cos(2*PI*x/(domain_limits[1] - domain_limits[0])) *
+	                  std::cos(4*PI*y/(domain_limits[3] - domain_limits[2])) *
+	                  std::cos(3*PI*z/(domain_limits[5] - domain_limits[4]));
         }
       }
     }
@@ -94,10 +99,13 @@ std::vector<scalar_type> make_data(int num_batch, box3d<index> const local,
 	      y = domain_limits[2] + y_scaling * indices[y_order];
 	      z = domain_limits[4] + z_scaling * indices[z_order];
 	      // local index for this process's result vector
-	      index ind = (k - local.low[local.order[2]]) * plane + (j - local.low[local.order[1]]) * line + i;
+	      index ind = (k - local.low[local.order[2]]) * plane + (j - local.low[local.order[1]]) * line
+		      + i - local.low[local.order[0]];
 	      // set result as function of x, y, and z
 	      // CHANGE HERE
-              result[batch_offset + ind] = x * y * z;
+              result[batch_offset + ind] = std::cos(2*PI*x/(domain_limits[1] - domain_limits[0])) *
+		                             std::cos(4*PI*y/(domain_limits[3] - domain_limits[2])) *
+		                             std::cos(3*PI*z/(domain_limits[5] - domain_limits[4]));
 	  }
 	}
       }

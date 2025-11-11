@@ -56,7 +56,7 @@ void benchmark_fft(std::array<int,3> size_fft, std::deque<std::string> const &ar
 
     // Create input and output boxes on local processor
     box3d<index> const world = {{0, 0, 0}, {size_fft[0]-1, size_fft[1]-1, size_fft[2]-1}};
-    // Example to change the order of which dimension is stored fasest-middle-slowest changing:
+    // Example to change the order of which dimension is stored fastest-middle-slowest changing:
     // This makes y the fastest, z the middle, and x the slowest.
 //    box3d<index> const world = {{0, 0, 0}, {size_fft[0]-1, size_fft[1]-1, size_fft[2]-1}, {1, 2, 0}};
 
