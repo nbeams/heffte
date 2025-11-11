@@ -56,6 +56,9 @@ void benchmark_fft(std::array<int,3> size_fft, std::deque<std::string> const &ar
 
     // Create input and output boxes on local processor
     box3d<index> const world = {{0, 0, 0}, {size_fft[0]-1, size_fft[1]-1, size_fft[2]-1}};
+    // Example to change the order of which dimension is stored fasest-middle-slowest changing:
+    // This makes y the fastest, z the middle, and x the slowest.
+//    box3d<index> const world = {{0, 0, 0}, {size_fft[0]-1, size_fft[1]-1, size_fft[2]-1}, {1, 2, 0}};
 
     // Get grid of processors at input and output
     std::array<int,3> proc_i = heffte::proc_setup_min_surface(world, nprocs);
@@ -118,7 +121,9 @@ void benchmark_fft(std::array<int,3> size_fft, std::deque<std::string> const &ar
     };
 
     // Locally initialize input
-    auto input = make_data<input_type>(batch_size, inboxes[me]);
+    // Set x, y, z global domain endpoints as [xmin, xmax, ymin, ymax, zmin, zmax]
+    std::array<precision_type, 6> domain = {-1.0, 1.0, 0.0, 2.0, 0.0, 1.0};
+    auto input = make_data<input_type>(batch_size, inboxes[me], domain, world);
     auto reference_input = input; // safe a copy for error checking
 
     // define allocation for in-place transform

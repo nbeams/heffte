@@ -36,6 +36,74 @@ std::vector<scalar_type> make_data(int num_batch, box3d<index> const world){
         r = static_cast<scalar_type>(unif(park_miller));
     return result;
 }
+// Version that lets you set values based on a function of x, y, and z
+template<typename scalar_type, typename index, typename domain_type>
+std::vector<scalar_type> make_data(box3d<index> const local,
+		std::array<domain_type, 6> domain_limits, box3d<index> const world){
+    std::vector<scalar_type> result(local.count());
+    int const plane = local.size[local.order[0]] * local.size[local.order[1]];
+    int const line  = local.size[local.order[0]];
+    domain_type x = 0.0;
+    domain_type y = 0.0;
+    domain_type z = 0.0;
+    int x_order = local.find_order(0);
+    int y_order = local.find_order(1);
+    int z_order = local.find_order(2);
+    domain_type x_scaling = (domain_limits[1] - domain_limits[0]) / (world.size[0] - 1);
+    domain_type y_scaling = (domain_limits[3] - domain_limits[2]) / (world.size[1] - 1);
+    domain_type z_scaling = (domain_limits[5] - domain_limits[4]) / (world.size[2] - 1);
+
+    for(index k = local.low[local.order[2]]; k <= local.high[local.order[2]]; k++){
+      for(index j = local.low[local.order[1]]; j <= local.high[local.order[1]]; j++){
+        for(index i = local.low[local.order[0]]; i <= local.high[local.order[0]]; i++){
+          std::array<index,3> indices = {i, j, k}; // fast, mid, slow
+          x = domain_limits[0] + x_scaling * indices[x_order];
+          y = domain_limits[2] + y_scaling * indices[y_order];
+          z = domain_limits[4] + z_scaling * indices[z_order];
+	  // local index for this process's result vector
+	  index ind = (k - local.low[local.order[2]]) * plane + (j - local.low[local.order[1]]) * line + i;
+	  // set result as function of x, y, and z
+          result[ind] = x * y * z;
+        }
+      }
+    }
+    return result;
+}
+template<typename scalar_type, typename index, typename domain_type>
+std::vector<scalar_type> make_data(int num_batch, box3d<index> const local,
+		std::array<domain_type, 6> domain_limits, box3d<index> const world){
+    std::vector<scalar_type> result(num_batch * local.count());
+    int const plane = local.size[local.order[0]] * local.size[local.order[1]];
+    int const line  = local.size[local.order[0]];
+    domain_type x = 0.0;
+    domain_type y = 0.0;
+    domain_type z = 0.0;
+    int x_order = local.find_order(0);
+    int y_order = local.find_order(1);
+    int z_order = local.find_order(2);
+    domain_type x_scaling = (domain_limits[1] - domain_limits[0]) / (world.size[0] - 1);
+    domain_type y_scaling = (domain_limits[3] - domain_limits[2]) / (world.size[1] - 1);
+    domain_type z_scaling = (domain_limits[5] - domain_limits[4]) / (world.size[2] - 1);
+    for(int b = 0; b < num_batch; b++){
+      index batch_offset = b * local.count();
+      for(index k = local.low[local.order[2]]; k <= local.high[local.order[2]]; k++){
+        for(index j = local.low[local.order[1]]; j <= local.high[local.order[1]]; j++){
+          for(index i = local.low[local.order[0]]; i <= local.high[local.order[0]]; i++){
+              std::array<index,3> indices = {i, j, k}; // fast, mid, slow
+	      x = domain_limits[0] + x_scaling * indices[x_order];
+	      y = domain_limits[2] + y_scaling * indices[y_order];
+	      z = domain_limits[4] + z_scaling * indices[z_order];
+	      // local index for this process's result vector
+	      index ind = (k - local.low[local.order[2]]) * plane + (j - local.low[local.order[1]]) * line + i;
+	      // set result as function of x, y, and z
+	      // CHANGE HERE
+              result[batch_offset + ind] = x * y * z;
+	  }
+	}
+      }
+    }
+    return result;
+}
 
 template<typename scalar_type>
 void get_subbox_array(box3d<> const world, box3d<> const box, scalar_type const *input, scalar_type *result){
